@@ -1,12 +1,10 @@
 <template>
-  <div class="scanner-container">
+  <div class="scanner-container" ref="scannerRef">
     <div class="scanner-wrapper" v-show="isScanning">
       <video 
         ref="videoRef" 
         class="scanner-video" 
-        playsinline 
-        autoplay 
-        muted
+        playsinline
       ></video>
       <canvas ref="canvasRef" class="scanner-canvas"></canvas>
       <div class="scanner-overlay">
@@ -49,17 +47,21 @@
 import { ref, onUnmounted } from 'vue'
 import { showToast } from 'vant'
 import jsQR from 'jsqr'
+import 'webrtc-adapter'
 
 const emit = defineEmits(['scan-result'])
 
 const isScanning = ref(false)
 const scanResult = ref('')
 const scanTime = ref('')
+const scannerRef = ref(null)
 const videoRef = ref(null)
 const canvasRef = ref(null)
 
 let stream = null
 let animationFrame = null
+let previousCode = null
+let parity = 0
 
 const formatTime = () => {
   const now = new Date()
@@ -75,33 +77,65 @@ const formatTime = () => {
 
 const startScan = async () => {
   try {
-    const constraints = {
-      video: {
-        facingMode: 'environment',
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast('当前浏览器不支持摄像头调用')
+      return
     }
 
-    stream = await navigator.mediaDevices.getUserMedia(constraints)
+    previousCode = null
+    parity = 0
     
-    if (videoRef.value) {
-      videoRef.value.srcObject = stream
-      videoRef.value.setAttribute('playsinline', 'true')
-      videoRef.value.muted = true
-      await videoRef.value.play()
-      isScanning.value = true
-      scanQRCode()
+    const canvas = canvasRef.value
+    const ctx = canvas.getContext('2d')
+    
+    // 使用后置摄像头
+    const facingMode = { exact: 'environment' }
+    
+    const handleSuccess = (mediaStream) => {
+      stream = mediaStream
+      
+      if (videoRef.value.srcObject !== undefined) {
+        videoRef.value.srcObject = stream
+      } else if (videoRef.value.mozSrcObject !== undefined) {
+        videoRef.value.mozSrcObject = stream
+      } else if (window.URL.createObjectURL) {
+        videoRef.value.src = window.URL.createObjectURL(stream)
+      } else if (window.webkitURL) {
+        videoRef.value.src = window.webkitURL.createObjectURL(stream)
+      } else {
+        videoRef.value.src = stream
+      }
+      
+      // 关键：设置 playsInline 防止 iOS 全屏
+      videoRef.value.playsInline = true
+      
+      const playPromise = videoRef.value.play()
+      playPromise.catch(() => {
+        showToast('请在浏览器设置中允许自动播放')
+      })
+      playPromise.then(() => {
+        isScanning.value = true
+        scanQRCode()
+      })
     }
+
+    // 先尝试后置摄像头
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode } })
+      .then(handleSuccess)
+      .catch(() => {
+        // 后置摄像头失败，尝试任意摄像头
+        navigator.mediaDevices
+          .getUserMedia({ video: true })
+          .then(handleSuccess)
+          .catch((error) => {
+            console.error('Camera error:', error)
+            showToast('无法访问相机，请检查权限设置')
+          })
+      })
   } catch (err) {
     console.error('Camera error:', err)
-    if (err.name === 'NotAllowedError') {
-      showToast('请在浏览器设置中允许相机权限')
-    } else if (err.name === 'NotFoundError') {
-      showToast('未找到相机设备')
-    } else {
-      showToast('无法访问相机: ' + err.message)
-    }
+    showToast('无法访问相机: ' + err.message)
   }
 }
 
@@ -124,14 +158,24 @@ const scanQRCode = () => {
       })
 
       if (code && code.data) {
-        scanResult.value = code.data
-        scanTime.value = formatTime()
-        stopScan()
-        emit('scan-result', code.data)
-        return
+        // 防止重复触发
+        if (previousCode !== code.data) {
+          previousCode = code.data
+        } else if (previousCode === code.data) {
+          parity += 1
+        }
+        
+        if (parity > 2) {
+          scanResult.value = code.data
+          scanTime.value = formatTime()
+          stopScan()
+          emit('scan-result', code.data)
+          parity = 0
+          return
+        }
       }
     } catch (err) {
-      console.error('Decode error:', err)
+      // 静默处理解码错误
     }
   }
 
@@ -151,7 +195,8 @@ const stopScan = async () => {
     stream = null
   }
 
-  if (videoRef.value) {
+  if (videoRef.value && videoRef.value.srcObject) {
+    videoRef.value.srcObject.getTracks().forEach(t => t.stop())
     videoRef.value.srcObject = null
   }
 }
@@ -159,6 +204,8 @@ const stopScan = async () => {
 const handleScanAgain = () => {
   scanResult.value = ''
   scanTime.value = ''
+  previousCode = null
+  parity = 0
   startScan()
 }
 
@@ -174,7 +221,7 @@ onUnmounted(() => {
 <style scoped>
 .scanner-container {
   height: 100%;
-  background: #f5f5f5;
+  background: #000;
 }
 
 .scanner-wrapper {
@@ -285,5 +332,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  background: #f5f5f5;
 }
 </style>
