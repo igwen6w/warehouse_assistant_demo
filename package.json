@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@vueuse/core": "^14.2.1",
-    "html5-qrcode": "^2.3.8",
+    "jsqr": "^1.4.0",
     "sass": "^1.97.3",
     "vant": "^4.9.22",
     "vite-plugin-pwa": "^1.2.0",

@@ -1,7 +1,14 @@
 <template>
   <div class="scanner-container">
     <div class="scanner-wrapper" v-show="isScanning">
-      <div id="qr-reader"></div>
+      <video 
+        ref="videoRef" 
+        class="scanner-video" 
+        playsinline 
+        autoplay 
+        muted
+      ></video>
+      <canvas ref="canvasRef" class="scanner-canvas"></canvas>
       <div class="scanner-overlay">
         <div class="scan-frame">
           <div class="corner tl"></div>
@@ -39,16 +46,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { Html5Qrcode } from 'html5-qrcode'
+import { ref, onUnmounted } from 'vue'
 import { showToast } from 'vant'
+import jsQR from 'jsqr'
 
 const emit = defineEmits(['scan-result'])
 
 const isScanning = ref(false)
 const scanResult = ref('')
 const scanTime = ref('')
-let html5QrCode = null
+const videoRef = ref(null)
+const canvasRef = ref(null)
+
+let stream = null
+let animationFrame = null
 
 const formatTime = () => {
   const now = new Date()
@@ -64,44 +75,84 @@ const formatTime = () => {
 
 const startScan = async () => {
   try {
-    html5QrCode = new Html5Qrcode('qr-reader')
+    const constraints = {
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    }
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints)
     
-    const devices = await Html5Qrcode.getCameras()
-    if (devices && devices.length) {
-      const cameraId = devices[devices.length - 1].id
-      
-      await html5QrCode.start(
-        cameraId,
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 },
-          aspectRatio: 1.0
-        },
-        (decodedText) => {
-          scanResult.value = decodedText
-          scanTime.value = formatTime()
-          stopScan()
-          emit('scan-result', decodedText)
-        },
-        () => {}
-      )
+    if (videoRef.value) {
+      videoRef.value.srcObject = stream
+      videoRef.value.setAttribute('playsinline', 'true')
+      videoRef.value.muted = true
+      await videoRef.value.play()
       isScanning.value = true
+      scanQRCode()
     }
   } catch (err) {
     console.error('Camera error:', err)
-    showToast('无法访问相机，请确保已授予相机权限')
+    if (err.name === 'NotAllowedError') {
+      showToast('请在浏览器设置中允许相机权限')
+    } else if (err.name === 'NotFoundError') {
+      showToast('未找到相机设备')
+    } else {
+      showToast('无法访问相机: ' + err.message)
+    }
   }
 }
 
-const stopScan = async () => {
-  if (html5QrCode && isScanning.value) {
+const scanQRCode = () => {
+  if (!videoRef.value || !canvasRef.value || !isScanning.value) return
+
+  const video = videoRef.value
+  const canvas = canvasRef.value
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
     try {
-      await html5QrCode.stop()
-      html5QrCode.clear()
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'dontInvert'
+      })
+
+      if (code && code.data) {
+        scanResult.value = code.data
+        scanTime.value = formatTime()
+        stopScan()
+        emit('scan-result', code.data)
+        return
+      }
     } catch (err) {
-      console.error('Stop error:', err)
+      console.error('Decode error:', err)
     }
-    isScanning.value = false
+  }
+
+  animationFrame = requestAnimationFrame(scanQRCode)
+}
+
+const stopScan = async () => {
+  isScanning.value = false
+  
+  if (animationFrame) {
+    cancelAnimationFrame(animationFrame)
+    animationFrame = null
+  }
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop())
+    stream = null
+  }
+
+  if (videoRef.value) {
+    videoRef.value.srcObject = null
   }
 }
 
@@ -134,9 +185,14 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-#qr-reader {
+.scanner-video {
   width: 100%;
   height: 100%;
+  object-fit: cover;
+}
+
+.scanner-canvas {
+  display: none;
 }
 
 .scanner-overlay {
